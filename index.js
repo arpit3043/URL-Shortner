@@ -1,129 +1,51 @@
-const path = require('path');
 const express = require('express');
-const morgan = require('morgan');
-const helmet = require('helmet');
-const yup = require('yup');
-const monk = require('monk');
-const rateLimit = require('express-rate-limit');
-const slowDown = require('express-slow-down');
-const { nanoid } = require('nanoid');
-
-require('dotenv').config();
-
-const db = monk(process.env.MONGODB_URI);
-const urls = db.get('urls');
-urls.createIndex({ slug: 1 }, { unique: true });
+const urlRoute = require('./routes/url');
+const URL = require('./models/url');
+const { connectToMongoDB } = require('connect');
 
 const app = express();
-app.enable('trust proxy');
+const PORT = process.env.PORT || 8001;
 
-app.use(helmet());
-app.use(morgan('common'));
 app.use(express.json());
-app.use(express.static('./public'));
 
-const notFoundPath = path.join(__dirname, 'public/404.html');
-
-// app.get('/', (req, res)=> {
-//     res.json({
-//         message: 'ABS.SH - Short URLs for your work'
-//     });
-// });
-
-// app.get('/', (req, res)=> {
-//     res.json({
-//         message: 'ABS.SH - Short URLs for your work'
-//     });
-// });
-
-// app.get('/url/:id', (req, res)=> {
-//     //TODO: get a short url by id
-// });
-
-// app.get('/:id', (req, res)=> {
-//     //TODO: redict to url
-// });
-
-// app.post('/url', (req, res)=> {
-//     //TODO: create a short url
-// });
-
-// app.get('/url/:id', (req, res)=> {
-//     //TODO: create a short url
-// });
-
-app.get('/:id', async (req, res, next) => {
-    const { id: slug } = req.params;
-    try {
-      const url = await urls.findOne({ slug });
-      if (url) {
-        return res.redirect(url.url);
-      }
-      return res.status(404).sendFile(notFoundPath);
-    } catch (error) {
-      return res.status(404).sendFile(notFoundPath);
-    }
-  });
-  
-  const schema = yup.object().shape({
-    slug: yup.string().trim().matches(/^[\w\-]+$/i),
-    url: yup.string().trim().url().required(),
-  });
-  
-  app.post('/url', slowDown({
-    windowMs: 30 * 1000,
-    delayAfter: 1,
-    delayMs: 500,
-  }), rateLimit({
-    windowMs: 30 * 1000,
-    max: 1,
-  }), async (req, res, next) => {
-    let { slug, url } = req.body;
-    try {
-      await schema.validate({
-        slug,
-        url,
-      });
-      if (url.includes('abs.sh')) {
-        throw new Error('Stop it. 🛑');
-      }
-      if (!slug) {
-        slug = nanoid(5);
-      } else {
-        const existing = await urls.findOne({ slug });
-        if (existing) {
-          throw new Error('Slug in use. 🍔');
-        }
-      }
-      slug = slug.toLowerCase();
-      const newUrl = {
-        url,
-        slug,
-      };
-      const created = await urls.insert(newUrl);
-      res.json(created);
-    } catch (error) {
-      next(error);
-    }
-  });
-  
-  app.use((req, res, next) => {
-    res.status(404).sendFile(notFoundPath);
-  });
-  
-  app.use((error, req, res, next) => {
-    if (error.status) {
-      res.status(error.status);
-    } else {
-      res.status(500);
-    }
-    res.json({
-      message: error.message,
-      stack: process.env.NODE_ENV === 'production' ? '🥞' : error.stack,
+connectToMongoDB('mongodb://localhost:27017/short-urls')
+    .then(() => console.log('Connected to MongoDB'))
+    .catch((error) => {
+        console.error('Failed to connect to MongoDB:', error);
+        process.exit(1); // Exit the application if MongoDB connection fails
     });
-  });
-  
-  const port = process.env.PORT || 1337;
-  app.listen(port, () => {
-    console.log(`Listening at http://localhost:${port}`);
-  });
+
+app.use('/url', urlRoute);
+
+app.get('/:shortId', async (req, res, next) => {
+    try {
+        const { shortId } = req.params;
+
+        const entry = await URL.findOneAndUpdate(
+            { shortId },
+            {
+                $push: {
+                    visitHistory: {
+                        timestamp: Date.now(),
+                    },
+                },
+            },
+            { new: true }
+        );
+
+        if (!entry) {
+            return res.status(404).json({ error: 'Short URL not found' });
+        }
+
+        res.redirect(entry.redirectURL);
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.use((err, req, res, next) => {
+    console.error('Error:', err);
+    res.status(500).json({ error: 'Internal Server Error' });
+});
+
+app.listen(PORT, () => console.log(`Server started at port ${PORT}`));
